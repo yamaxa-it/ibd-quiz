@@ -23,7 +23,7 @@ async function boot() {
   setView(msg('Загрузка…', ''));
   let Q;
   try { Q = await auth.rest('questions?select=id,part,q,options&order=id.asc&limit=1000'); }
-  catch (e) { return setView(msg('Не удалось загрузить тесты', 'Проверь интернет и настройки Supabase (anonymous sign-ins должны быть включены).', true)); }
+  catch (e) { return setView(msg('Не удалось загрузить тесты', 'Причина: ' + (e && e.message ? e.message : e) + (e && e.status ? ' (код ' + e.status + ')' : '') + '. Пришли этот текст, и я подскажу, что исправить.', true)); }
   if (!Q.length) return setView(msg('Тестов пока нет', 'Администратор ещё не загрузил вопросы.'));
   QM = new Map(Q.map(q => [q.id, q]));
   const m = new Map(); Q.forEach(q => { if (!m.has(q.part)) m.set(q.part, []); m.get(q.part).push(q.id); });
