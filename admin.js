@@ -150,52 +150,49 @@ function validate(items) {
 
 async function testsTab(body) {
   body.append(el('p', 'muted', 'Загрузка…'));
-  const cur = await auth.rpc('admin_questions'); body.replaceChildren();
-  const info = el('section', 'card');
-  const byPart = {}; cur.forEach(q => byPart[q.part] = (byPart[q.part] || 0) + 1);
-  info.append(el('h2', 'serif', 'Сейчас в базе'), el('p', 'lead', cur.length ? cur.length + ' вопросов · части: ' + Object.keys(byPart).map(k => byPart[k]).join(' / ') : 'Тесты ещё не загружены.'));
-  if (cur.length) {
-    const b = el('button', 'btn ghost', 'Скачать текущие тесты (JSON)');
-    b.onclick = () => download('questions-backup.json', JSON.stringify(cur.map(q => ({ q: q.q, options: q.options, correct: q.correct })), null, 1), 'application/json');
-    info.append(b);
-  }
-  body.append(info);
-  const up = el('section', 'card'); up.style.marginTop = '16px';
-  up.append(el('h2', 'serif', 'Загрузить новые тесты'));
-  up.append(el('p', 'lead', 'Файл questions.json (его готовлю я) или текст в формате с «+++++» и «=====». Загрузка заменяет все текущие тесты. Правильные ответы нигде не показываются игрокам и хранятся только на сервере.'));
-  const file = el('input', 'input'); file.type = 'file'; file.accept = '.json,.txt,application/json,text/plain';
-  const sz = el('input', 'input'); sz.type = 'number'; sz.min = '1'; sz.max = '500'; sz.value = '30'; sz.style.maxWidth = '120px'; sz.setAttribute('aria-label', 'Вопросов в части');
-  const r1 = el('div', 'row'); r1.append(file); const r2 = el('div', 'row'); r2.append(el('span', 'muted', 'Вопросов в одной части:'), sz);
-  const prev = el('div'), go = el('button', 'btn', 'Загрузить в базу'); go.hidden = true;
-  up.append(r1, r2, prev, go); body.append(up);
-  let items = null;
-  const show = () => {
-    prev.replaceChildren(); go.hidden = true; if (!items) return;
-    const e = validate(items);
-    if (e.length) { const u = el('ul', 'clean bad-t'); e.slice(0, 12).forEach(x => u.append(el('li', null, x))); if (e.length > 12) u.append(el('li', null, 'и ещё ' + (e.length - 12) + '…')); prev.append(el('p', 'bad-t', 'Найдены ошибки, загрузка невозможна:'), u); return; }
-    const c = Math.max(1, Math.min(500, parseInt(sz.value, 10) || 30)), sizes = []; for (let i = 0; i < items.length; i += c) sizes.push(Math.min(c, items.length - i));
-    prev.append(el('p', 'ok-t', 'Проверка пройдена: ' + items.length + ' вопросов. Части: ' + sizes.join(' / ') + '.'));
-    const s = items[0]; const m = el('div', 'miss'); m.append(el('div', 'qq', 'Пример: ' + s.q)); s.options.forEach((o, i) => m.append(el('div', i === s.correct ? 'r' : 'muted', (i === s.correct ? '✓ ' : '· ') + o))); prev.append(m);
-    go.hidden = false;
-  };
-  sz.oninput = show;
-  file.onchange = async () => {
-    items = null; prev.replaceChildren(); const f = file.files[0]; if (!f) return;
-    if (f.size > 4e6) { prev.append(el('p', 'bad-t', 'Файл слишком большой.')); return; }
-    try { const t = await f.text(); items = /\.json$/i.test(f.name) || /^\s*\[/.test(t) ? JSON.parse(t) : parseTxt(t); }
-    catch (e) { prev.append(el('p', 'bad-t', 'Не удалось прочитать файл: ' + e.message)); return; }
-    if (Array.isArray(items)) items = items.map(x => x && typeof x === 'object' ? { q: x.q, options: x.options, correct: x.correct } : x);
-    show();
-  };
-  go.onclick = async () => {
-    const c = Math.max(1, Math.min(500, parseInt(sz.value, 10) || 30));
-    if (!confirm('Заменить все текущие тесты на ' + items.length + ' новых? Результаты игроков сохранятся, но их локальный прогресс по старым вопросам сбросится.')) return;
-    go.disabled = true;
-    // Варианты перемешиваются здесь, чтобы порядок в базе не выдавал правильный ответ
-    const payload = items.map(x => { const perm = shuffle(x.options.map((_, i) => i)); return { q: x.q, options: perm.map(i => x.options[i]), correct: perm.indexOf(x.correct) }; });
-    try { const n = await auth.rpc('admin_replace_questions', { p_items: payload, p_chunk: c }); alert('Загружено вопросов: ' + n); dash(); }
-    catch (e) { go.disabled = false; prev.append(el('p', 'bad-t', 'Ошибка загрузки: ' + e.message)); }
-  };
+  const [subs, tests, qs] = await Promise.all([auth.rest('subjects?select=id,title&order=id.asc'), auth.rest('tests?select=id,subject_id,title&order=id.asc'), auth.rpc('admin_questions')]);
+  body.replaceChildren();
+  const cnt = {}; qs.forEach(q => cnt[q.part] = (cnt[q.part] || 0) + 1);
+  const run = async fn => { try { await fn(); dash(); } catch (e) { alert(e.message); } };
+  const ns = el('section', 'card'), r0 = el('div', 'row'), ni = el('input', 'input'), nb = el('button', 'btn', 'Добавить предмет');
+  ni.placeholder = 'Название предмета'; ni.maxLength = 80; r0.style.marginTop = '0';
+  nb.onclick = () => ni.value.trim() && run(() => auth.rpc('admin_add_subject', { p_title: ni.value.trim() }));
+  onEnter(ni, () => nb.click()); r0.append(ni, nb); ns.append(el('h2', null, 'Новый предмет'), r0); body.append(ns);
+  if (!subs.length) body.append(el('p', 'muted mt', 'Предметов пока нет. Добавь первый.'));
+  subs.forEach(s => {
+    const c = el('section', 'card mt'), h = el('div', 'row'), ds = el('button', 'link del push', 'Удалить предмет');
+    h.style.marginTop = '0'; h.append(el('h2', null, s.title), ds); c.append(h);
+    ds.onclick = () => confirm('Удалить предмет «' + s.title + '» со всеми тестами и результатами по ним?') && run(() => auth.rpc('admin_delete_subject', { p_id: s.id }));
+    const ts = tests.filter(t => t.subject_id === s.id);
+    if (!ts.length) c.append(el('p', 'muted', 'Тестов пока нет.'));
+    ts.forEach(t => {
+      const rr = el('div', 'row'), d = el('button', 'link del push', 'Удалить'); rr.style.marginTop = '4px';
+      d.onclick = () => confirm('Удалить тест «' + t.title + '»?') && run(() => auth.rpc('admin_delete_test', { p_id: t.id }));
+      rr.append(el('span', null, t.title), el('span', 'muted', (cnt[t.id] || 0) + ' вопросов'), d); c.append(rr);
+    });
+    c.append(el('h2', 'mt', 'Добавить тест'));
+    const ti = el('input', 'input'), fi = el('input', 'input'), ub = el('button', 'btn', 'Загрузить'), pv = el('div'), row = el('div', 'row');
+    ti.placeholder = 'Название теста'; ti.maxLength = 80; fi.type = 'file'; fi.accept = '.json,.txt,application/json,text/plain'; ub.disabled = true;
+    let items = null;
+    fi.onchange = async () => {
+      items = null; ub.disabled = true; pv.replaceChildren(); const f = fi.files[0]; if (!f) return;
+      if (f.size > 4e6) { pv.append(el('p', 'bad-t', 'Файл слишком большой.')); return; }
+      try { const t = await f.text(); items = /\.json$/i.test(f.name) || /^\s*\[/.test(t) ? JSON.parse(t) : parseTxt(t); }
+      catch (e) { pv.append(el('p', 'bad-t', 'Не удалось прочитать файл: ' + e.message)); return; }
+      if (Array.isArray(items)) items = items.map(x => x && typeof x === 'object' ? { q: x.q, options: x.options, correct: x.correct } : x);
+      const er = validate(items);
+      if (er.length) { const u = el('ul', 'clean bad-t'); er.slice(0, 12).forEach(x => u.append(el('li', null, x))); pv.append(el('p', 'bad-t', 'Найдены ошибки:'), u); items = null; return; }
+      pv.append(el('p', 'ok-t', 'Проверка пройдена: ' + items.length + ' вопросов.')); ub.disabled = false;
+      if (!ti.value) ti.value = f.name.replace(/\.[^.]+$/, '').slice(0, 80);
+    };
+    ub.onclick = () => {
+      if (!items || !ti.value.trim()) { ti.focus(); return; } ub.disabled = true;
+      // Варианты перемешиваются, чтобы порядок в базе не выдавал правильный ответ
+      const payload = items.map(x => { const p = shuffle(x.options.map((_, i) => i)); return { q: x.q, options: p.map(i => x.options[i]), correct: p.indexOf(x.correct) }; });
+      run(() => auth.rpc('admin_add_test', { p_subject: s.id, p_title: ti.value.trim(), p_items: payload })).finally(() => { ub.disabled = false; });
+    };
+    row.append(ti, fi, ub); c.append(row, pv); body.append(c);
+  });
 }
 
 (async function start() {

@@ -18,19 +18,24 @@ function msg(title, text, retry) {
 }
 const errBack = e => { const v = msg('Что-то пошло не так', e.message || String(e)); const b = el('button', 'btn', 'На главную'); b.onclick = home; v.append(b); setView(v); };
 
+let SM = new Map(), TM = new Map(), CUR = null;
+const tname = n => (TM.get(n) || {}).title || ('Часть ' + n);
 async function boot() {
-  if (!ONLINE) return setView(msg('Сайт ещё не настроен', 'Заполни SUPABASE_URL и SUPABASE_KEY в файле config.js (см. README).'));
+  if (!ONLINE) return setView(msg('Сайт ещё не настроен', 'Заполни SUPABASE_URL и SUPABASE_KEY в файле config.js.'));
   setView(msg('Загрузка…', ''));
-  let Q;
-  try { Q = await auth.rest('questions?select=id,part,q,options&order=id.asc&limit=1000'); }
-  catch (e) { return setView(msg('Не удалось загрузить тесты', 'Причина: ' + (e && e.message ? e.message : e) + (e && e.status ? ' (код ' + e.status + ')' : '') + '. Пришли этот текст, и я подскажу, что исправить.', true)); }
+  let Q, S, T;
+  try {
+    [S, T, Q] = await Promise.all([auth.rest('subjects?select=id,title&order=id.asc'), auth.rest('tests?select=id,subject_id,title&order=id.asc'), auth.rest('questions?select=id,part,q,options&order=id.asc&limit=5000')]);
+  } catch (e) { return setView(msg('Не удалось загрузить тесты', 'Причина: ' + (e && e.message ? e.message : e) + (e && e.status ? ' (код ' + e.status + ')' : ''), true)); }
   if (!Q.length) return setView(msg('Тестов пока нет', 'Администратор ещё не загрузил вопросы.'));
+  SM = new Map(S.map(s => [s.id, s])); TM = new Map(T.map(t => [t.id, t]));
   QM = new Map(Q.map(q => [q.id, q]));
   const m = new Map(); Q.forEach(q => { if (!m.has(q.part)) m.set(q.part, []); m.get(q.part).push(q.id); });
-  PARTS = [...m.keys()].sort((a, b) => a - b).map(n => ({ n, ids: m.get(n) }));
-  const sig = hash(Q.map(q => q.q).join('\n'));
-  if (P.sig !== sig) { P.sig = sig; P.weak = []; P.best = {}; P.session = null; save(); }
+  PARTS = [...m.keys()].filter(n => TM.has(n)).sort((a, b) => a - b).map(n => ({ n, ids: m.get(n) }));
   P.weak = P.weak.filter(id => QM.has(id));
+  Object.keys(P.best).forEach(k => { if (!TM.has(+k)) delete P.best[k]; });
+  if (P.session && !activeSession()) P.session = null;
+  save();
   if (P.name) auth.rpc('set_name', { p_name: P.name }).catch(() => {});
   P.name ? home() : welcome();
 }
@@ -59,30 +64,53 @@ function welcome() {
 
 function activeSession() { const s = P.session; return s && s.items && s.i < s.items.length && s.items.every(it => QM.has(it.id)) ? s : null; }
 
-function home() {
-  const v = el('div');
-  v.append(el('div', 'eyebrow', 'Подготовка к тестам'), el('h1', null, 'Исламское банковское дело'));
-  const total = PARTS.reduce((a, p) => a + p.ids.length, 0);
-  v.append(el('p', 'lead', 'Вопросов: ' + total + '. Порядок вопросов и вариантов ответа перемешивается при каждом прохождении. Прогресс сохраняется, а результаты попадают в рейтинг.'));
-  const who = el('div', 'muted'); who.append('Ты в рейтинге как «' + P.name + '» · ');
-  const ch = el('button', 'link', 'сменить имя'); ch.onclick = () => { const w = el('section', 'card'); w.append(el('h2', 'serif', 'Сменить имя')); w.append(nameForm('Сохранить', home)); const bk = el('button', 'link', 'Назад'); bk.onclick = home; w.append(bk); setView(w); };
-  who.append(ch); v.append(who);
-  const s = activeSession(), g = el('div', 'grid');
-  PARTS.forEach(p => {
-    const c = el('button', 'card part'); c.type = 'button';
-    c.append(el('div', 'num', rom(p.n)), el('div', 'ttl', 'Часть ' + p.n), el('div', 'meta', p.ids.length + ' вопросов'));
-    const best = P.best[p.n], meter = el('div', 'meter'), i = el('i'); i.style.width = (best ? Math.round(best / p.ids.length * 100) : 0) + '%'; meter.append(i); c.append(meter);
-    if (s && !s.retry && s.part === p.n) { c.append(el('span', 'badge go', 'продолжить · ' + (s.i + 1))); c.onclick = question; }
-    else { if (best !== undefined) c.append(el('span', 'badge', best + ' / ' + p.ids.length)); c.onclick = () => begin(p.n, p.ids, false); }
-    g.append(c);
-  });
-  v.append(g);
-  const row = el('div', 'row');
+function whoLine() {
+  const w = el('div', 'muted'); w.append('Ты в рейтинге как «' + P.name + '» · ');
+  const ch = el('button', 'link', 'сменить имя');
+  ch.onclick = () => { const c = el('section', 'card'); c.append(el('h2', null, 'Сменить имя'), nameForm('Сохранить', home)); const bk = el('button', 'link', 'Назад'); bk.onclick = home; c.append(bk); setView(c); };
+  w.append(ch); return w;
+}
+function footer(v) {
+  const s = activeSession(), row = el('div', 'row');
   if (P.weak.length) { const b = el('button', 'btn', 'Слабые вопросы (' + P.weak.length + ')'); b.onclick = () => begin(0, P.weak.slice(), true); row.append(b); }
   if (s && s.retry) { const b = el('button', 'btn ghost', 'Продолжить: работа над ошибками'); b.onclick = question; row.append(b); }
   const rs = el('button', 'link', 'Сбросить локальный прогресс');
   rs.onclick = () => { if (confirm('Удалить сохранённый на этом устройстве прогресс? Рейтинг не изменится.')) { P.weak = []; P.best = {}; P.session = null; save(); home(); } };
-  row.append(rs); v.append(row); setView(v);
+  row.append(rs); v.append(row);
+}
+function home() { CUR && SM.has(CUR) ? testsView() : subjectsView(); }
+
+function subjectsView() {
+  const v = el('div');
+  v.append(el('div', 'eyebrow', 'Подготовка к тестам'), el('h1', null, 'Выбери предмет'));
+  v.append(el('p', 'lead', 'Порядок вопросов и вариантов перемешивается при каждом прохождении. Прогресс сохраняется, результаты попадают в рейтинг.'), whoLine());
+  const g = el('div', 'grid');
+  SM.forEach(s => {
+    const ps = PARTS.filter(p => TM.get(p.n).subject_id === s.id); if (!ps.length) return;
+    const c = el('button', 'card part'); c.type = 'button'; c.style.setProperty('--i', g.children.length);
+    const done = ps.filter(p => P.best[p.n] !== undefined).length, meter = el('div', 'meter'), i = el('i');
+    i.style.width = Math.round(done / ps.length * 100) + '%'; meter.append(i);
+    c.append(el('div', 'num', String(g.children.length + 1).padStart(2, '0')), el('div', 'ttl', s.title),
+      el('div', 'meta', 'Тестов: ' + ps.length + ' · вопросов: ' + ps.reduce((x, p) => x + p.ids.length, 0)), meter);
+    c.onclick = () => { CUR = s.id; home(); }; g.append(c);
+  });
+  v.append(g); footer(v); setView(v);
+}
+
+function testsView() {
+  const v = el('div'), s = activeSession(), sub = SM.get(CUR);
+  const back = el('button', 'link', '← Все предметы'); back.onclick = () => { CUR = null; home(); };
+  v.append(back, el('h1', null, sub.title), el('p', 'lead', 'Выбери тест. Лучший результат по каждому сохраняется.'));
+  const g = el('div', 'grid');
+  PARTS.filter(p => TM.get(p.n).subject_id === CUR).forEach((p, idx) => {
+    const c = el('button', 'card part'); c.type = 'button'; c.style.setProperty('--i', idx);
+    const best = P.best[p.n], meter = el('div', 'meter'), i = el('i'); i.style.width = (best ? Math.round(best / p.ids.length * 100) : 0) + '%'; meter.append(i);
+    c.append(el('div', 'num', String(idx + 1).padStart(2, '0')), el('div', 'ttl', tname(p.n)), el('div', 'meta', p.ids.length + ' вопросов'), meter);
+    if (s && !s.retry && s.part === p.n) { c.append(el('span', 'badge go', 'продолжить · ' + (s.i + 1))); c.onclick = question; }
+    else { if (best !== undefined) c.append(el('span', 'badge', best + ' / ' + p.ids.length)); c.onclick = () => begin(p.n, p.ids, false); }
+    g.append(c);
+  });
+  v.append(g); footer(v); setView(v);
 }
 
 async function begin(n, ids, retry) {
@@ -100,7 +128,7 @@ async function begin(n, ids, retry) {
 function question() {
   const S = P.session, it = S.items[S.i], q = QM.get(it.id), n = S.items.length;
   const v = el('div'), top = el('div', 'top2');
-  top.append(el('span', null, (S.retry ? 'Работа над ошибками' : 'Часть ' + S.part) + ' · вопрос ' + (S.i + 1) + ' из ' + n));
+  top.append(el('span', null, (S.retry ? 'Работа над ошибками' : tname(S.part)) + ' · вопрос ' + (S.i + 1) + ' из ' + n));
   const ex = el('button', 'link', 'Выйти'); ex.onclick = home; top.append(ex); v.append(top);
   const pr = el('div', 'progress'), pi = el('i'); pi.style.width = (S.i / n * 100) + '%'; pr.append(pi); v.append(pr);
   v.append(el('h2', 'q', q.q));
@@ -136,19 +164,24 @@ function question() {
 }
 addEventListener('keydown', e => { if (kb && !(e.target instanceof HTMLInputElement)) kb(e); });
 
+function countScore(r, n) {
+  const d = el('div', 'score', '0 из ' + n), t0 = performance.now();
+  const f = t => { const k = Math.min(1, (t - t0) / 900); d.textContent = Math.round(r * (1 - Math.pow(1 - k, 3))) + ' из ' + n; if (k < 1) requestAnimationFrame(f); };
+  requestAnimationFrame(f); return d;
+}
 function results() {
   const S = P.session, n = S.items.length, wrong = []; let right = 0;
   S.items.forEach(it => { if (it.a && it.a.c === it.a.r) right++; else wrong.push(it); });
   if (!S.retry && (P.best[S.part] === undefined || right > P.best[S.part])) P.best[S.part] = right;
   const sp = S.part, sr = S.retry; P.session = null; save();
   const v = el('div');
-  v.append(el('div', 'eyebrow', sr ? 'Работа над ошибками' : 'Часть ' + sp), el('div', 'score', right + ' из ' + n));
+  v.append(el('div', 'eyebrow', sr ? 'Работа над ошибками' : tname(sp)), countScore(right, n));
   v.append(el('p', 'lead', wrong.length ? 'Ошибок: ' + wrong.length + '. Разбор ниже.' : (sr ? 'Без ошибок.' : 'Без ошибок. Результат отправлен в рейтинг.')));
   const row = el('div', 'row');
   if (wrong.length) { const b = el('button', 'btn', 'Повторить ошибки (' + wrong.length + ')'); const ids = wrong.map(w => w.id); b.onclick = () => begin(0, ids, true); row.append(b); }
-  if (!sr) { const b = el('button', 'btn ghost', 'Пройти часть заново'); b.onclick = () => begin(sp, PARTS.find(p => p.n === sp).ids, false); row.append(b); }
+  if (!sr) { const b = el('button', 'btn ghost', 'Пройти заново'); b.onclick = () => begin(sp, PARTS.find(p => p.n === sp).ids, false); row.append(b); }
   const lb = el('button', 'btn ghost', 'Рейтинг'); lb.onclick = board; row.append(lb);
-  const h = el('button', 'btn ghost', 'К списку частей'); h.onclick = home; row.append(h); v.append(row);
+  const h = el('button', 'btn ghost', 'К тестам'); h.onclick = home; row.append(h); v.append(row);
   if (wrong.length) {
     const hd = el('h2', 'serif', 'Вопросы с ошибками'); hd.style.marginTop = '30px'; v.append(hd);
     wrong.forEach(it => { const q = QM.get(it.id), m = el('div', 'miss'); m.append(el('div', 'qq', q.q));
@@ -173,6 +206,6 @@ async function board() {
   const r = el('div', 'row'); r.append(bk); v.append(r);
 }
 
-document.getElementById('brand').onclick = () => { if (PARTS.length && P.name) home(); };
+document.getElementById('brand').onclick = () => { CUR = null; if (PARTS.length && P.name) home(); };
 document.getElementById('navBoard').onclick = () => { if (PARTS.length && P.name) board(); };
 boot();
