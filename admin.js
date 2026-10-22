@@ -228,7 +228,8 @@ async function testsTab(body) {
       rr.append(el('span', null, t.title), el('span', 'muted', (cnt[t.id] || 0) + ' вопросов'), qb, d); c.append(rr, pn);
     });
     c.append(el('h2', 'mt', 'Добавить тест'));
-    const ti = el('input', 'input'), fi = el('input', 'input'), ub = el('button', 'btn', 'Загрузить'), pv = el('div'), row = el('div', 'row');
+    const ti = el('input', 'input'), fi = el('input', 'input'), ub = el('button', 'btn', 'Загрузить'), pv = el('div'), row = el('div', 'row'), si = el('input', 'input');
+    si.type = 'number'; si.min = 0; si.max = 500; si.value = 30; si.title = 'Сколько вопросов в одном тесте (0 — не делить)'; si.style.flex = '0 0 120px';
     ti.placeholder = 'Название теста'; ti.maxLength = 80; fi.type = 'file'; fi.accept = '.json,.txt,.docx,.xlsx'; ub.disabled = true;
     let items = null;
     fi.onchange = async () => {
@@ -246,9 +247,11 @@ async function testsTab(body) {
       if (!items || !ti.value.trim()) { ti.focus(); return; } ub.disabled = true;
       // Варианты перемешиваются, чтобы порядок в базе не выдавал правильный ответ
       const payload = items.map(x => { const p = shuffle(x.options.map((_, i) => i)); return { q: x.q, options: p.map(i => x.options[i]), correct: p.indexOf(x.correct) }; });
-      run(() => auth.rpc('admin_add_test', { p_subject: s.id, p_title: ti.value.trim(), p_items: payload })).finally(() => { ub.disabled = false; });
+      const sz = Math.max(0, Math.min(500, parseInt(si.value, 10) || 0)), base = ti.value.trim(), parts = [];
+      if (sz > 0) for (let i = 0; i < payload.length; i += sz) parts.push(payload.slice(i, i + sz)); else parts.push(payload);
+      run(async () => { for (let i = 0; i < parts.length; i++) await auth.rpc('admin_add_test', { p_subject: s.id, p_title: parts.length > 1 ? base + ' · ' + (i + 1) : base, p_items: parts[i] }); }).finally(() => { ub.disabled = false; });
     };
-    row.append(ti, fi, ub); c.append(row, pv); body.append(c);
+    row.append(ti, fi, si, ub); c.append(row, el('p', 'muted', 'Число справа — вопросов в одном тесте (0 — не делить). Большой файл разобьётся на несколько тестов.'), pv); body.append(c);
   });
 }
 
