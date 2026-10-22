@@ -5,12 +5,12 @@ const LS = 'ibd_v2';
 let P = { name: '', weak: [], best: {}, session: null, sig: '' };
 try { Object.assign(P, JSON.parse(localStorage.getItem(LS) || '{}')); } catch (e) {}
 const save = () => { try { localStorage.setItem(LS, JSON.stringify(P)); } catch (e) {} };
-let QM = new Map(), PARTS = [], kb = null, busy = false;
+let QM = new Map(), PARTS = [], kb = null, busy = false, tmr = 0;
 const LET = 'ABCDEFGH';
 const rom = n => ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'][n] || String(n);
 const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return String(h); };
 
-function setView(node) { kb = null; node.classList.add('rise'); root.replaceChildren(node); window.scrollTo(0, 0); }
+function setView(node) { kb = null; clearInterval(tmr); node.classList.add('rise'); root.replaceChildren(node); window.scrollTo(0, 0); }
 function msg(title, text, retry) {
   const c = el('section', 'card'); c.append(el('h2', 'serif', title)); if (text) c.append(el('p', 'muted', text));
   if (retry) { const b = el('button', 'btn', 'Попробовать снова'); b.onclick = boot; c.append(b); }
@@ -101,6 +101,7 @@ function testsView() {
   const v = el('div'), s = activeSession(), sub = SM.get(CUR);
   const back = el('button', 'link', '← Все предметы'); back.onclick = () => { CUR = null; home(); };
   v.append(back, el('h1', null, sub.title), el('p', 'lead', 'Выбери тест. Лучший результат по каждому сохраняется.'));
+  { const ex = el('button', 'btn', 'Экзамен по предмету'); ex.onclick = examSetup; v.append(ex); }
   const g = el('div', 'grid');
   PARTS.filter(p => TM.get(p.n).subject_id === CUR).forEach((p, idx) => {
     const c = el('button', 'card part'); c.type = 'button'; c.style.setProperty('--i', idx);
@@ -111,6 +112,25 @@ function testsView() {
     g.append(c);
   });
   v.append(g); footer(v); setView(v);
+}
+
+
+function examSetup() {
+  const ids = PARTS.filter(p => TM.get(p.n).subject_id === CUR).flatMap(p => p.ids), sub = SM.get(CUR);
+  const c = el('section', 'card');
+  c.append(el('div', 'eyebrow', 'Экзамен'), el('h2', null, sub.title), el('p', 'lead', 'Вопросы выбираются случайно из всех тестов предмета. Подсказок нет: правильные ответы показываются только в конце. На каждый вопрос 45 секунд. Результат экзамена в рейтинг не идёт.'));
+  const row = el('div', 'row');
+  [...new Set([10, 20, 40, ids.length].filter(n => n <= ids.length))].sort((x, y) => x - y).forEach(n => {
+    const b = el('button', 'btn ghost', n + ' вопросов · ' + Math.ceil(n * 45 / 60) + ' мин'); b.onclick = () => beginExam(ids, n); row.append(b);
+  });
+  const bk = el('button', 'link', 'Назад'); bk.onclick = home; row.append(bk); c.append(row); setView(c);
+}
+async function beginExam(ids, n) {
+  setView(msg('Подготовка…', ''));
+  const pick = shuffle(ids).slice(0, n); let aid;
+  try { aid = await auth.rpc('start_attempt', { p_part: 0, p_retry: true, p_ids: pick }); } catch (e) { return errBack(e); }
+  const items = pick.map(id => ({ id, order: shuffle(QM.get(id).options.map((_, k) => k)), a: null }));
+  P.session = { aid, part: 0, retry: true, exam: { end: Date.now() + n * 45000 }, items, i: 0 }; save(); question();
 }
 
 async function begin(n, ids, retry) {
@@ -128,8 +148,10 @@ async function begin(n, ids, retry) {
 function question() {
   const S = P.session, it = S.items[S.i], q = QM.get(it.id), n = S.items.length;
   const v = el('div'), top = el('div', 'top2');
-  top.append(el('span', null, (S.retry ? 'Работа над ошибками' : tname(S.part)) + ' · вопрос ' + (S.i + 1) + ' из ' + n));
-  const ex = el('button', 'link', 'Выйти'); ex.onclick = home; top.append(ex); v.append(top);
+  top.append(el('span', null, (S.exam ? 'Экзамен' : S.retry ? 'Работа над ошибками' : tname(S.part)) + ' · вопрос ' + (S.i + 1) + ' из ' + n));
+  const ex = el('button', 'link', 'Выйти'); ex.onclick = home; let tickFn = null;
+  if (S.exam) { const tm = el('span', 'timer'); tickFn = () => { const s = Math.max(0, Math.round((S.exam.end - Date.now()) / 1000)); tm.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); tm.classList.toggle('low', s < 60); if (!s) { clearInterval(tmr); results(); } }; tickFn(); top.append(tm); }
+  top.append(ex); v.append(top);
   const pr = el('div', 'progress'), pi = el('i'); pi.style.width = (S.i / n * 100) + '%'; pr.append(pi); v.append(pr);
   v.append(el('h2', 'q', q.q));
   const box = el('div', 'opts'), err = el('div', 'err'), row = el('div', 'row');
@@ -154,12 +176,13 @@ function question() {
       const r = await auth.rpc('check_answer', { p_attempt: S.aid, p_qid: it.id, p_choice: k });
       it.a = { c: k, r }; const w = P.weak.indexOf(it.id);
       if (k === r) { if (w >= 0) P.weak.splice(w, 1); } else if (w < 0) P.weak.push(it.id);
-      save(); reveal(k, r);
+      save(); if (S.exam) { b.classList.add('sel'); setTimeout(nb.onclick, 350); } else reveal(k, r);
     } catch (e) { btns.forEach(x => x.disabled = false); err.textContent = 'Не удалось проверить ответ: ' + e.message + '. Попробуй ещё раз.'; }
     busy = false;
   });
   v.append(box, err, row); setView(v);
-  if (it.a) reveal(it.a.c, it.a.r);
+  if (tickFn) tmr = setInterval(tickFn, 1000);
+  if (it.a) { if (S.exam) nb.onclick(); else reveal(it.a.c, it.a.r); }
   kb = e => { if (/^[1-9]$/.test(e.key) && btns[+e.key - 1] && !btns[+e.key - 1].disabled) btns[+e.key - 1].click(); else if ((e.key === 'Enter') && !nb.hidden && document.activeElement !== nb) nb.click(); };
 }
 addEventListener('keydown', e => { if (kb && !(e.target instanceof HTMLInputElement)) kb(e); });
@@ -173,9 +196,9 @@ function results() {
   const S = P.session, n = S.items.length, wrong = []; let right = 0;
   S.items.forEach(it => { if (it.a && it.a.c === it.a.r) right++; else wrong.push(it); });
   if (!S.retry && (P.best[S.part] === undefined || right > P.best[S.part])) P.best[S.part] = right;
-  const sp = S.part, sr = S.retry; P.session = null; save();
+  const sp = S.part, sr = S.retry, sx = S.exam; P.session = null; save();
   const v = el('div');
-  v.append(el('div', 'eyebrow', sr ? 'Работа над ошибками' : tname(sp)), countScore(right, n));
+  v.append(el('div', 'eyebrow', sx ? 'Экзамен' : sr ? 'Работа над ошибками' : tname(sp)), countScore(right, n));
   v.append(el('p', 'lead', wrong.length ? 'Ошибок: ' + wrong.length + '. Разбор ниже.' : (sr ? 'Без ошибок.' : 'Без ошибок. Результат отправлен в рейтинг.')));
   const row = el('div', 'row');
   if (wrong.length) { const b = el('button', 'btn', 'Повторить ошибки (' + wrong.length + ')'); const ids = wrong.map(w => w.id); b.onclick = () => begin(0, ids, true); row.append(b); }
@@ -209,3 +232,8 @@ async function board() {
 document.getElementById('brand').onclick = () => { CUR = null; if (PARTS.length && P.name) home(); };
 document.getElementById('navBoard').onclick = () => { if (PARTS.length && P.name) board(); };
 boot();
+addEventListener('pointermove', e => {
+  const c = e.target.closest && e.target.closest('.part,.opt'); if (!c) return;
+  const r = c.getBoundingClientRect(); c.style.setProperty('--mx', (e.clientX - r.left) + 'px'); c.style.setProperty('--my', (e.clientY - r.top) + 'px');
+});
+if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

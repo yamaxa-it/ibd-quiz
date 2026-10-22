@@ -148,6 +148,61 @@ function validate(items) {
   return err;
 }
 
+async function unzip(buf) {
+  const u8 = new Uint8Array(buf), dv = new DataView(buf); let e = u8.length - 22;
+  while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+  if (e < 0) throw new Error('это не DOCX/XLSX');
+  const n = dv.getUint16(e + 10, true); let p = dv.getUint32(e + 16, true); const files = {};
+  for (let i = 0; i < n; i++) {
+    const m = dv.getUint16(p + 10, true), cs = dv.getUint32(p + 20, true), nl = dv.getUint16(p + 28, true), xl = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), off = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nl)); p += 46 + nl + xl + cl;
+    const st = off + 30 + dv.getUint16(off + 26, true) + dv.getUint16(off + 28, true);
+    files[name] = async () => { const x = u8.subarray(st, st + cs); if (m === 0) return new TextDecoder().decode(x); return new Response(new Blob([x]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text(); };
+  }
+  return files;
+}
+const xml = s => new DOMParser().parseFromString(s, 'application/xml');
+async function readDocx(f) {
+  const z = await unzip(await f.arrayBuffer()); if (!z['word/document.xml']) throw new Error('в файле нет word/document.xml');
+  return [...xml(await z['word/document.xml']()).getElementsByTagName('w:p')].map(p => [...p.getElementsByTagName('w:t')].map(t => t.textContent).join('')).join('\n');
+}
+async function readXlsx(f) {
+  const z = await unzip(await f.arrayBuffer());
+  const ss = z['xl/sharedStrings.xml'] ? [...xml(await z['xl/sharedStrings.xml']()).getElementsByTagName('si')].map(si => [...si.getElementsByTagName('t')].map(t => t.textContent).join('')) : [];
+  const nm = Object.keys(z).filter(k => /^xl\/worksheets\/sheet\d+\.xml$/.test(k)).sort()[0]; if (!nm) throw new Error('в файле нет листов');
+  const out = [];
+  [...xml(await z[nm]()).getElementsByTagName('row')].forEach((row, ri) => {
+    const cells = [];
+    [...row.getElementsByTagName('c')].forEach(c => {
+      let idx = 0; for (const ch of (c.getAttribute('r') || 'A').replace(/\d+/g, '')) idx = idx * 26 + ch.charCodeAt(0) - 64;
+      const v = c.getElementsByTagName('v')[0], t = c.getElementsByTagName('t')[0], ty = c.getAttribute('t');
+      cells[idx - 1] = String(ty === 's' && v ? ss[+v.textContent] : ty === 'inlineStr' && t ? t.textContent : v ? v.textContent : '').trim();
+    });
+    let r = Array.from(cells, x => x || ''); if (/^\d+$/.test(r[0]) && r.length > 2) r = r.slice(1);
+    const q = r[0], options = r.slice(1).filter(Boolean);
+    if (ri === 0 && /^(вопрос|question)/i.test(q || '')) return;
+    if (q && options.length >= 2) out.push({ q, options, correct: 0 }); // в таблице правильный ответ — первый вариант (A)
+  });
+  return out;
+}
+function qlist(box, list, run) {
+  list.forEach(q => {
+    const w = el('div', 'miss'), r = el('div', 'row'), eb = el('button', 'link', 'Изменить'), db = el('button', 'link del', 'Удалить');
+    r.style.marginTop = '6px'; r.append(eb, db); w.append(el('div', 'qq', q.q), el('div', 'r', 'Верно: ' + q.options[q.correct]), r);
+    db.onclick = () => confirm('Удалить вопрос?') && run(() => auth.rpc('admin_delete_question', { p_id: q.id }));
+    eb.onclick = () => {
+      const qi = el('textarea', 'input'), oi = el('textarea', 'input'), ci = el('select', 'input'), sv = el('button', 'btn', 'Сохранить'), er = el('div', 'err');
+      qi.value = q.q; qi.rows = 3; oi.value = q.options.join('\n'); oi.rows = 5; sv.style.marginTop = '10px';
+      const lines = () => oi.value.split('\n').map(x => x.trim()).filter(Boolean);
+      const fill = () => { ci.replaceChildren(); lines().forEach((x, i) => { const o = el('option', null, 'Верный: ' + (i + 1) + '. ' + x.slice(0, 50)); o.value = i; ci.append(o); }); };
+      fill(); ci.value = q.correct; oi.oninput = () => { const k = ci.value; fill(); ci.value = k; };
+      sv.onclick = () => { const x = { q: qi.value.trim(), options: lines(), correct: +ci.value }, e2 = validate([x]); if (e2.length) { er.textContent = e2[0]; return; } run(() => auth.rpc('admin_update_question', { p_id: q.id, p_q: x.q, p_options: x.options, p_correct: x.correct })); };
+      w.replaceChildren(el('div', 'muted', 'Вопрос'), qi, el('div', 'muted mt', 'Варианты (по одному в строке)'), oi, ci, sv, er);
+    };
+    box.append(w);
+  });
+}
+
 async function testsTab(body) {
   body.append(el('p', 'muted', 'Загрузка…'));
   const [subs, tests, qs] = await Promise.all([auth.rest('subjects?select=id,title&order=id.asc'), auth.rest('tests?select=id,subject_id,title&order=id.asc'), auth.rpc('admin_questions')]);
@@ -168,21 +223,23 @@ async function testsTab(body) {
     ts.forEach(t => {
       const rr = el('div', 'row'), d = el('button', 'link del push', 'Удалить'); rr.style.marginTop = '4px';
       d.onclick = () => confirm('Удалить тест «' + t.title + '»?') && run(() => auth.rpc('admin_delete_test', { p_id: t.id }));
-      rr.append(el('span', null, t.title), el('span', 'muted', (cnt[t.id] || 0) + ' вопросов'), d); c.append(rr);
+      const qb = el('button', 'link', 'Вопросы'), pn = el('div'); pn.hidden = true;
+      qb.onclick = () => { pn.hidden = !pn.hidden; if (!pn.hidden && !pn.childNodes.length) qlist(pn, qs.filter(q => q.part === t.id), run); };
+      rr.append(el('span', null, t.title), el('span', 'muted', (cnt[t.id] || 0) + ' вопросов'), qb, d); c.append(rr, pn);
     });
     c.append(el('h2', 'mt', 'Добавить тест'));
     const ti = el('input', 'input'), fi = el('input', 'input'), ub = el('button', 'btn', 'Загрузить'), pv = el('div'), row = el('div', 'row');
-    ti.placeholder = 'Название теста'; ti.maxLength = 80; fi.type = 'file'; fi.accept = '.json,.txt,application/json,text/plain'; ub.disabled = true;
+    ti.placeholder = 'Название теста'; ti.maxLength = 80; fi.type = 'file'; fi.accept = '.json,.txt,.docx,.xlsx'; ub.disabled = true;
     let items = null;
     fi.onchange = async () => {
       items = null; ub.disabled = true; pv.replaceChildren(); const f = fi.files[0]; if (!f) return;
       if (f.size > 4e6) { pv.append(el('p', 'bad-t', 'Файл слишком большой.')); return; }
-      try { const t = await f.text(); items = /\.json$/i.test(f.name) || /^\s*\[/.test(t) ? JSON.parse(t) : parseTxt(t); }
+      try { if (/\.docx$/i.test(f.name)) items = parseTxt(await readDocx(f)); else if (/\.xlsx$/i.test(f.name)) items = await readXlsx(f); else { const t = await f.text(); items = /\.json$/i.test(f.name) || /^\s*\[/.test(t) ? JSON.parse(t) : parseTxt(t); } }
       catch (e) { pv.append(el('p', 'bad-t', 'Не удалось прочитать файл: ' + e.message)); return; }
       if (Array.isArray(items)) items = items.map(x => x && typeof x === 'object' ? { q: x.q, options: x.options, correct: x.correct } : x);
       const er = validate(items);
       if (er.length) { const u = el('ul', 'clean bad-t'); er.slice(0, 12).forEach(x => u.append(el('li', null, x))); pv.append(el('p', 'bad-t', 'Найдены ошибки:'), u); items = null; return; }
-      pv.append(el('p', 'ok-t', 'Проверка пройдена: ' + items.length + ' вопросов.')); ub.disabled = false;
+      pv.append(el('p', 'ok-t', 'Проверка пройдена: ' + items.length + ' вопросов.'), el('p', 'muted', 'Первый: ' + items[0].q.slice(0, 120))); ub.disabled = false;
       if (!ti.value) ti.value = f.name.replace(/\.[^.]+$/, '').slice(0, 80);
     };
     ub.onclick = () => {
